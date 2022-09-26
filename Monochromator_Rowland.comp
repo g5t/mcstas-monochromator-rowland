@@ -1,0 +1,756 @@
+/*******************************************************************************
+*
+* McStas, neutron ray-tracing package
+*         Copyright (C) 1997-2007, All rights reserved
+*         Risoe National Laboratory, Roskilde, Denmark
+*         Institut Laue Langevin, Grenoble, France
+*
+* Component: Monochromator_Rowland
+*
+* %I
+* Written by: Gregory Tucker
+* Date: Aug. 24th 2022
+* Origin: <a href="http://www.ess.eu">ESS</a>
+* Double bent multiple crystal slabs with anisotropic gaussian mosaic on
+* a Rowland sphere.
+*
+* %Description
+* Double bent infinitely thin mosaic crystal, useful as a monochromator or
+* analyzer. which uses a small-mosaicity approximation and taking into account
+* higher  order scattering. The mosaic is anisotropic gaussian, with different
+* FWHMs in the Y and Z directions. The scattering vector is perpendicular to the
+* surface. For an unrotated monochromator component, the crystal plane lies in
+* the y-z plane (ie. parallel to the beam). The component works in reflection, but
+* also transmits the non-diffracted beam. Reflectivity and transmission files may
+* be used. The slabs are positioned with their centers on a Rowland sphere,
+* that is the sphere with the virtual source, virtual focus, and monochromator
+* center on its surface; and are rotated according to the curvature radius.
+* When curvatures are set to 0, the monochromator is flat.
+* The curvatures approximation for parallel beam focusing to distance L, with
+* monochromator rotation angle A1 are:
+*   RV = 2*L*sin(DEG2RAD*A1);
+*   RH = 2*L/sin(DEG2RAD*A1);
+*
+* When you rotate the component by A1 = asin(Q/2/Ki)*RAD2DEG, do not forget to
+* rotate the following components by A2=2*A1 (for 1st order) !
+*
+* Example: Monochromator_Rowland(zwidth=0.01, yheight=0.01, gap=0.0005, NH=11, NV=11, mosaich=30.0, mosaicv=30.0, r0=0.7, Q=1.8734)
+*
+* Monochromator lattice parameter
+* PG       002 DM=3.355 AA (Highly Oriented Pyrolythic Graphite)
+* PG       004 DM=1.677 AA
+* Heusler  111 DM=3.362 AA (Cu2MnAl)
+* CoFe         DM=1.771 AA (Co0.92Fe0.08)
+* Ge       111 DM=3.266 AA
+* Ge       311 DM=1.714 AA
+* Ge       511 DM=1.089 AA
+* Ge       533 DM=0.863 AA
+* Si       111 DM=3.135 AA
+* Cu       111 DM=2.087 AA
+* Cu       002 DM=1.807 AA
+* Cu       220 DM=1.278 AA
+* Cu       111 DM=2.095 AA
+*
+* %Parameters
+* INPUT PARAMETERS:
+*
+* zwidth: [m]             horizontal width of an individual slab
+* yheight: [m]            vertical height of an individual slab
+* gap: [m]                typical gap  between adjacent slabs
+* NH: [int]               number of slabs horizontal
+* NV: [int]               number of slabs vertical
+* mosaich: [arc minutes]  Horisontal mosaic FWHM
+* mosaicv: [arc minutes]  Vertical mosaic FWHM
+* r0: [1]                 Maximum reflectivity. O unactivates component
+* Q: [AA-1]               Scattering vector
+* RV: [m]                 radius of vertical focussing. flat for 0
+* RH: [m]                 radius of horizontal focussing. flat for 0
+*
+* optional parameters
+* DM: [AA]                monochromator d-spacing instead of Q=2*pi/DM
+* mosaic: [arc minutes]   sets mosaich=mosaicv
+* width: [m]              total width of monochromator, along Z
+* height: [m]             total height of monochromator, along Y
+* verbose: [0/1]          verbosity level
+* reflect: [str]          reflectivity file name of text file as 2 columns [k, R]
+* transmit: [str]         transmission file name of text file as 2 columns [k, T]
+* t0: [1]                 transmission efficiency
+* order: [1]              specify the diffraction order, 1 is usually prefered. Use 0 for all
+*
+* %Link
+* <a href="http://mcstas.risoe.dk/pipermail/neutron-mc/1999q1/000133.html">Additional note</a> from Peter Link.
+* %L
+* Obsolete Mosaic_anisotropic by Kristian Nielsen
+* %L
+* Contributed Monochromator_2foc by Peter Link
+*
+* %End
+*******************************************************************************/
+
+DEFINE COMPONENT Monochromator_Rowland2
+DEFINITION PARAMETERS ()
+SETTING PARAMETERS (
+  string source,
+  string sink,
+  int source_index=-1,
+  int sink_index=-1,
+  string reflect="NULL",
+  string transmit="NULL",
+  zwidth=0.01,
+  yheight=0.01,
+  gap=0.0005,
+  int NH=11,
+  int NV=1,
+  mosaich=30.0,
+  mosaicv=30.0,
+  r0=0.7,
+  t0=1.0,
+  Q=1.8734,
+  RV=0,
+  RH=0,
+  DM=0,
+  mosaic=0,
+  width=0,
+  height=0,
+  verbose=0,
+  order=0,
+  angle_h=0,
+  angle_v=0,
+  string focush=0, // one of "infinite", "point", or "exact"
+  string focusv=0, 
+  show_construction=1,
+  rotation_angle=0 // set for output
+)
+OUTPUT PARAMETERS ()
+/* Neutron parameters: (x,y,z,vx,vy,vz,t,sx,sy,sz,p) */
+
+SHARE
+%{
+%include "read_table-lib"
+
+#pragma acc routine
+double GAUSS_monocurved(double x, double mean, double rms){
+  return (exp(-((x)-(mean))*((x)-(mean))/(2*(rms)*(rms)))/(sqrt(2*PI)*(rms)));
+}
+
+#pragma acc routine
+Coords relative_xz(Coords o, Rotation r, Coords t){
+  /* For two points, o and t defined in a global coordinate system find the relative vector between them,
+     rotated into a new coordinate system by r */
+  double tx, ty, tz;
+  coords_get(o, &tx, &ty, &tz);
+  coords_get(t, &tx, &ty, &tz);
+  return rot_apply(r, coords_sub(t, o));
+}
+
+#pragma acc routine
+double circle_xz(double x0, double z0, double x1, double z1, double* c){
+  /* Find the center and radius of the circle passing through the points
+      (x0, z0), (0, 0), and (x1, z1)
+     Stores the center as `c[0], c[1]`
+     Returns the radius or -1 if the points are colinear
+  */
+  // By enforcing that one point is the origin, we can simplify the general algorithm
+  // The points *must* be colinear, *and* we have a division problem:
+  if ((x0 == 0 && x1 == 0) || (z0 == 0 && z1 ==0)) return -1.;
+  double m0, m1;
+  m0 = x0 ? z0/x0 : 0;
+  m1 = x1 ? z1/x1 : 0;
+  c[0] = z0 ? x0/z0 : x0 ? 1 : 0; // if x0!=0 && z0==0 make sure m0 != p0
+  c[1] = z1 ? x1/z1 : x1 ? 1 : 0;
+  // equal slopes -> colinear {check the perpendicular slope in case of zeros}
+  if (m0 == m1 && c[0] == c[1]) return -1.;
+  // by picking the large absolute slope we avoid division by zero
+  // (hopefully also produces a more-stable result?)
+  if (abs(m0) > abs(m1)){
+    c[0] = (m0 * m1 * (z0 - z1) + m1 * x0 - m0 * x1) / (2 * (m1 - m0));
+    c[1] = (0.5 * x0 - c[0]) / m0 + 0.5 * z0;
+  } else {
+    c[0] = (m1 * m0 * (z1 - z0) + m0 * x1 - m1 * x0) / (2 * (m0 - m1));
+    c[1] = (0.5 * x1 - c[0]) / m1 + 0.5 * z1;
+  }
+  // calculate and return the radius
+  return sqrt((c[0] - x0) * (c[0] - x0) + (c[1] - z0) * (c[1] - z0));
+}
+
+#pragma acc routine
+double coverage_limit(int which, double x, double z, double rangle, double* center, double radius, double* point){
+  double vl = sqrt(x*x + z*z);
+  double v[2] = {x/vl, z/vl};
+  double xi[2] = {center[0] - x, center[1] - z};
+  double n[2] = {v[1], v[0]};
+  // there are two choices for the direction perpendicular to v:
+  n[which > 0] *= -1.0;
+  // the direction from (x, z) to the maximum viewing point
+  double s[2];
+  for (int i=0; i<2; ++i) s[i] = n[i]*sin(rangle) - v[i]*cos(rangle);
+  // since both (x,z) and point are on the circle, this all simplifies!
+  point[0] = x + s[0] * 2*(s[0] * xi[0] + s[1] * xi[1]);
+  point[1] = z + s[1] * 2*(s[0] * xi[0] + s[1] * xi[1]);
+  // now calculate beta, the angle between (center)->(point) and (center)->(origin):
+  // 	[(0,0) - (cx, cz)] . [(px, pz) - (cx, cz)] = |(0,0) - (cx, cz)| . |(px, pz) - (cx, cz)| cos(beta)
+  // 	radius^2 - (cx, cz) . (px, pz) = radius^2 cos(beta)
+  // 	cos(beta) = (1 - (cx, cz) . (px, pz)) / radius^2
+  double beta = acos( 1.0 - (point[0]*center[0] + point[1]*center[1])/radius/radius);
+  // If the dot product between (x,z) and (point) is negative, the returned angle should be negative
+  if (x * point[0] + z *point[1] < 0) beta *= -1;
+  return beta;
+}
+
+#pragma acc routine
+double exact_rowland_focus_angle(double ax, double az, double bx, double bz, double* point){
+  double n0[2] = {ax + bx, az + bz};
+  double np[2] = {ax + bx - 2*point[0], az + bz - 2*point[2]};
+  double l0 = sqrt(n0[0]*n0[0] + n0[1]*n0[1]);
+  double lp = sqrt(np[0]*np[0] + np[1]*np[1]);
+  n0[0] /= l0;
+  n0[1] /= l0;
+  np[0] /= lp;
+  np[1] /= lp;
+  double cphi = n0[0]*np[0] + n0[1]*np[1];
+  double phi = acos(fabs(cphi) < 1 ? cphi : cphi/fabs(cphi));
+  printf("a (%f, %f), b (%f, %f), p (%f, %f) -> phi %f\n", ax, az, bx, bz, point[0], point[2], phi);
+  double cab = -(ax * bz - az * bx);
+  double cnn = -(n0[0] * np[1] - n0[1] * np[0]);
+  return (cab * cnn < 0) ? -phi : phi;
+}
+
+struct crystal_properties {
+  int flag; // (verbose) & (rTableFlag << 1) & (tTableFlag << 2)
+  double tau; // mono_Q
+  int n; // order
+  double r; // r0
+  double t; // t0
+  double rms_y; // mos_rms_y;
+  double rms_z; // mos_rms_z;
+  double rms; // mos_rms_max;
+};
+#pragma acc routine
+int crystal_interaction(_class_particle* neutron, struct crystal_properties* prop, t_Table* rTable, t_Table* tTable){
+  const double Gauss_X[] = {-0.987992518020485, -0.937273392400706, -0.848206583410427, -0.724417731360170,
+                            -0.570972172608539, -0.394151347077563, -0.201194093997435, 0,
+                            0.201194093997435, 0.394151347077563, 0.570972172608539, 0.724417731360170,
+                            0.848206583410427, 0.937273392400706, 0.987992518020485};
+  const double Gauss_W[] = {0.030753241996117, 0.070366047488108, 0.107159220467172, 0.139570677926154,
+                            0.166269205816994, 0.186161000115562, 0.198431485327111, 0.202578241925561,
+                            0.198431485327111, 0.186161000115562, 0.166269205816994, 0.139570677926154,
+                            0.107159220467172, 0.070366047488108, 0.030753241996117};
+  int does_interact = 0; // -1 == absorbed, 0 == transmitted, +1 == scattered
+  // get the neutron velocity vector
+  double vi[3] = {neutron->vx, neutron->vy, neutron->vz};
+  // convert this to wavevector
+  double ki[3]; for (int i=0; i<3; ++i) ki[i] = V2K*vi[i];
+  // store the length of ki and find the incident normal
+  double k = 0; for (int i=0; i<3; ++i) k += ki[i] * ki[i]; k = sqrt(k);
+  double ku[3]; for (int i=0; i<3; ++i) ku[i] = ki[i]/k;
+
+  /* Determine the reflection order and corresponding nominal scattering vector with correct length and direction     *
+   * Only the order with the closest scattering vector is considered.                                                 */
+  double ratio = -2 * ki[0] / prop->tau;
+  // Ensure that Q_order is (+) since (-) --> entrance from the back, and then Q0 < 0
+  int Q_order = (int)fabs(floor(ratio + 0.5));
+  if (!Q_order) Q_order = 1;
+  // Enforce 2*k >= Q_order * mono_Q -- otherwise the scattering triangle can not be closed
+  if (Q_order > 2 * k / prop->tau) --Q_order;
+  if ((!prop->n && Q_order) || (Q_order = abs(prop->n) && prop->n)) {
+    // Check that Bragg scattering is actually possible
+    double tau = Q_order * prop->tau;
+    double taux = ratio < 0 ? -tau : tau;
+    double rk = (prop->flag & 2 ? Table_Value(*rTable, k, 1) : 1.0) * prop->r;
+    if (rk > 1.) {
+      if (prop->flag & 1 && rk > 1.01)
+        printf("Warning: Lowered reflectivity from %f to 1 (k=%f)\n", rk, k);
+      rk = 0.999;
+    } else if (rk < 0){
+      if (prop->flag)
+        printf("Warning: Raised reflectivity from %f to 0 (k=%f)\n", rk, k);
+      rk = 0;
+    }
+    // Find the expected (half) scattering angle
+    double theta = asin(tau / 2 / k);
+    // And how far this neutron direction deviates for the expected direction
+    double delta = asin(fabs(ku[0])) - theta;
+    // Use the crystal mosaic to find the reflection probability given the deviation
+    delta = delta * delta / (ki[1] * ki[1] + ki[2] * ki[2]); // abuse delta storage for common part of calculation
+    double y_prob = exp(-ki[2] * ki[2] * delta / (2 * prop->rms_y * prop->rms_y));
+    double z_prob = exp(-ki[1] * ki[1] * delta / (2 * prop->rms_z * prop->rms_z));
+    double p_reflect = fabs(rk) * y_prob * z_prob;
+
+    if (rand01() < p_reflect){
+      // MC choice to reflect!
+      double cos_2theta = cos(2 * theta);
+      double k_sin_2theta = k * sin(2 * theta);
+      // vectors in a space with one axis parallel to Q
+      double a[3], b[3], c[3];
+      // macro time
+      // b <- perp-to-ki-and-tau -- with length equal to Q-perp-to-kf
+      vec_prod(b[0], b[1], b[2], ki[0], ki[1], ki[2], taux, 0, 0);
+      NORM(b[0], b[1], b[2]);
+      for (int i=0; i<3; ++i) b[i] *= k_sin_2theta;
+      // a <- perp-to-(ki-and-tau)-and-ki -- with length equal to Q-perp-to-kf
+      vec_prod(a[0], a[1], a[2], b[0], b[1], b[2], ku[0], ku[1], ku[2]);
+      // c <- parallel-to-ki -- with length equal to Q-parallel-to-kf
+      for (int i=0; i<3; ++i) c[i] = ki[i] * (cos_2theta - 1);
+      /* Choose the Gaussian distribution width to sample the angle phi on the Debye-Scherrer cone for the scattered
+       * neutron. The radius of the cone is smaller by a factor of 1/cos(theta) than the radius of the sphere describing
+       * the possible orientations of Q due to the mosaicity. Start with width of 1/cos(theta) greater than the largest
+       * of the horizontal and vertical mosaics. */
+      double sample = prop->rms / cos(theta);
+      /* Reduce the sample width until it is small enough to avoid sampling scattering directions with
+       * unreasonably-small scattering probability. Use a cut-off of 5 times the Gaussian width for considering
+       * scattering probability as well as for integration limits for the sampled distribution. */
+      double step = 2./3.;
+      for (int i=0; i<100; ++i){
+        double w = 5 * sample;
+        double cw = cos(w);
+        double sw = sin(w);
+        double tx =  c[0] + cw * a[0] + sw * b[0];
+        double ty = (c[1] + cw * a[1] + sw * b[1]) / prop->rms_z;
+        double tz = (c[2] + cw * a[2] + sw * b[2]) / prop->rms_y;
+        // Stop when close to a factor of 5^2
+        if (tz * tz + ty * ty < (25/step * tx * tx)) break;
+        sample *= step;
+      }
+
+      // Integrate the resulting distribution to the same cut-off
+      double total_p = 0; // total scattering probability for ki
+      for (int i=0; i<(sizeof(Gauss_X)/sizeof(double)); ++i) {
+        double cp = cos(5*sample*Gauss_X[i]);
+        double sp = sin(5*sample*Gauss_X[i]);
+        double q[2];
+        for (int j=0; j<2; ++j) q[j] = (c[1+j] + cp * a[1+j] + sp * b[1+j]) / (c[0] + cp * a[0] + sp * b[0]);
+        total_p += Gauss_W[i] * GAUSS_monocurved(q[1], 0, prop->rms_y) * GAUSS_monocurved(q[0], 0, prop->rms_z);
+      }
+      total_p *= 5 * sample;
+
+      // MC point on the Debye-Scherrer cone:
+      double phi = sample * randnorm();
+      // reuse c to store the chosen Q
+      double cphi = cos(phi);
+      double sphi = sin(phi);
+      for (int i=0; i<3; ++i) c[i] += cphi * a[i] + sphi * b[i];
+      // update our probability of reflecting based on the chosen Q
+      p_reflect = GAUSS_monocurved(c[2]/c[0], 0, prop->rms_y) * GAUSS_monocurved(c[1]/c[0], 0, prop->rms_z);
+      p_reflect /= total_p * GAUSS_monocurved(phi, 0, sample);
+      if (p_reflect > 1) p_reflect = 1;
+      if (p_reflect > 0){
+        // update the neutron to have the outgoing velocity
+        // kf = ki - Q ... so why do we use the + here?
+        neutron->vx = K2V * (ki[0] + c[0]);
+        neutron->vy = K2V * (ki[1] + c[1]);
+        neutron->vz = K2V * (ki[2] + c[2]);
+        // update the neutron weight
+        neutron->p *= p_reflect;
+      }
+      does_interact = (p_reflect > 0) ? 1 : -1; // scatters or is absorbed
+    }
+    // end of attempting to Bragg scatter
+  }
+  if (!does_interact){
+    // Now we have the possiblity to transmit (or absorb) the neutron
+    double tp = ((prop->flag & 4) ? Table_Value(*tTable, k, 1) : 1.) * prop->t;
+    if (tp > 1){
+      if (tp > 1.01 && prop->flag & 1)
+        printf("Warning: Lowered transmission from %f to 1 (k=%f)\n", tp, k);
+      tp = 0.999;
+    }
+    if (tp > 0) {
+      neutron->p *= tp;
+    } else {
+      does_interact = -1;
+    }
+  }
+  // The neutron has either scattered (does_interact=1), been transmitted (does_interact=0), or been absorbed (does_interact=-1)
+  return does_interact;
+}
+
+%}
+
+DECLARE
+%{
+  struct crystal_properties properties;
+  double mos_rms_y; /* root-mean-square of mosaic, in radians */
+  double mos_rms_z;
+  double mos_2sig2_y;
+  double mos_2sig2_z;
+  double mos_rms_max;
+  double mono_Q;
+  t_Table rTable;
+  t_Table tTable;
+  int rTableFlag;
+  int tTableFlag;
+  double coverage[2];
+  double slab_width[2];
+  double center_xz[2];
+  double *tiltH;
+  double *tiltV;
+  double *position;
+  double *radii_xz;
+  double *edges;
+  double *rowland;
+%}
+
+INITIALIZE
+%{
+  // Initialize the crystal properties struct:
+  properties.flag = verbose ? 1 : 0;
+  properties.tau = (DM) ? 2*PI/DM : Q;
+  properties.n = order;
+  properties.r = r0;
+  properties.t = t0;  
+  if (mosaic != 0) {
+    properties.rms_y = MIN2RAD*mosaic/sqrt(8*log(2));
+    properties.rms_z = properties.rms_y;
+  } else {
+    properties.rms_y = MIN2RAD*mosaich/sqrt(8*log(2));
+    properties.rms_z = MIN2RAD*mosaicv/sqrt(8*log(2));
+  }
+  properties.rms = properties.rms_y > properties.rms_z ? properties.rms_y : properties.rms_z;
+  
+  if (properties.tau <= 0) { fprintf(stderr,"Monochromator_Rowland: %s: Error scattering vector Q = 0\n", NAME_CURRENT_COMP); exit(-1); }
+  if (properties.r <  0) { fprintf(stderr,"Monochromator_Rowland: %s: Error reflectivity r0 is negative\n", NAME_CURRENT_COMP); exit(-1); }
+  if (properties.r == 0) { fprintf(stderr,"Monochromator_Rowland: %s: Reflectivity r0 is null. Ignoring component.\n", NAME_CURRENT_COMP); }
+  if (NH*NV == 0) { fprintf(stderr,"Monochromator_Rowland: %s: no slabs ??? (NH or NV=0)\n", NAME_CURRENT_COMP); exit(-1); }
+  
+  if (source_index < 0) source_index = _getcomp_index(source);
+  if (sink_index < 0) sink_index = _getcomp_index(sink);
+    
+  Coords src = relative_xz(_comp->_position_absolute, _comp->_rotation_absolute, POS_A_COMP_INDEX(source_index));
+  Coords snk = relative_xz(_comp->_position_absolute, _comp->_rotation_absolute, POS_A_COMP_INDEX(sink_index));
+  double source_x, source_y, source_z, sink_x, sink_y, sink_z;
+  coords_get(src, &source_x, &source_y, &source_z);
+  coords_get(snk, &sink_x, &sink_y, &sink_z);
+  
+  double radius = circle_xz(source_x, source_z, sink_x, sink_z, center_xz);
+  if (radius < 0){
+    fprintf(stderr,
+      "Monochromator_Rowland: %s: Virtual source (%f, %f) and sink (%f, %f) are colinear with the monochromator\n",
+      NAME_CURRENT_COMP, source_x, source_z, sink_x, source_z);
+    exit(-1);
+  }
+  if (radius == 0){
+    fprintf(stderr,
+      "Monochromator_Rowland: %s: Virtual source (%f, %f) and sink (%f, %f) are commensurate with the monochromator\n",
+      NAME_CURRENT_COMP, source_x, source_z, sink_x, source_z);
+    exit(-1);
+  }
+
+  double point0[2], point1[2];
+  double beta0 = coverage_limit(0, source_x, source_z, DEG2RAD * angle_h, center_xz, radius, point0);
+  if (angle_h && !beta0) {
+    printf("Failed to find the horizontal coverage limit\n");
+  }
+  double beta1 = coverage_limit(1, source_x, source_z, DEG2RAD * angle_h, center_xz, radius, point1);
+  if (angle_h && !beta1) {
+    printf("Failed to find the horizontal coverage limit\n");
+  }
+
+  if ((properties.flag & 1) && properties.r)
+  {
+    printf("Monochromator_Rowland: component %s Q=%.3g Angs-1 (DM=%.4g Angs)\n", NAME_CURRENT_COMP, properties.tau, 2*PI/properties.tau);
+    if (NH*NV == 1) {
+      printf("                     flat.\n");
+    } else {
+      if (NH > 1) {
+        printf("                     horizontal: %i blades", (int)NH);
+        if (focush) printf(" automatic (%s)", focush);
+        if (RH != 0) printf(" focusing with RH=%.3g [m]", RH);
+        printf("\n");
+      }
+      if (NV > 1) {
+        printf("                     vertical:   %i blades", (int)NV);
+        if (focusv) printf(" automatic (%s)", focusv);
+        if (RV != 0) printf(" focusing with RV=%.3g [m]", RV);
+        printf("\n");
+      }
+    }
+    printf("                     Horizontal coverage limits (from the Rowland circle center) (%f, %f)\n", RAD2DEG*beta0, RAD2DEG*beta1);
+  }
+
+  if (reflect != NULL && properties.r && strlen(reflect) && strcmp(reflect,"NULL") && strcmp(reflect,"0")) {
+    if (properties.flag & 1) fprintf(stdout, "Monochromator_Rowland: %s: Reflectivity data (k, R) from %s\n", NAME_CURRENT_COMP, reflect);
+    Table_Read(&rTable, reflect, 1); /* read 1st block data from file into rTable */
+    Table_Rebin(&rTable);         /* rebin as evenly, increasing array */
+    if (rTable.rows < 2) Table_Free(&rTable);
+    if (properties.flag & 1) Table_Info(rTable);
+    properties.flag &= 2;
+  }
+  if (transmit != NULL && strlen(transmit) && strcmp(transmit,"NULL") && strcmp(transmit,"0"))
+  {
+    if (properties.flag & 1) fprintf(stdout, "Monochromator_Rowland: %s: Transmission data (k, T) from %s\n", NAME_CURRENT_COMP, transmit);
+    Table_Read(&tTable, transmit, 1); /* read 1st block data from file into rTable */
+    Table_Rebin(&tTable);         /* rebin as evenly, increasing array */
+    if (tTable.rows < 2) Table_Free(&tTable);
+    if (properties.flag & 1) Table_Info(tTable);
+    properties.flag &= 4;
+  }
+
+  slab_width[0] = width ? (width + gap) / NH - gap : zwidth;
+  slab_width[1] = height ? (height + gap) / NV - gap : yheight;
+  
+  // update things to allow for asymetric beta!
+  coverage[0] = fabs(beta0) + fabs(beta1); // DEG2RAD * angle_h;
+  coverage[1] = DEG2RAD * angle_v;
+  int Nax[2] = {NH, NV};
+  for (int ax=0; ax < 2; ++ax) if (!coverage[ax]) {
+    coverage[ax] = 2*atan2(Nax[ax]*(slab_width[ax] + gap) - gap, 2*radius);
+  }
+
+  tiltH=calloc((int)NH*NV,sizeof(double));
+  tiltV=calloc((int)NV*NH,sizeof(double));
+  position = calloc((int)3*NH*NV, sizeof(double));
+  radii_xz = calloc((int)NV, sizeof(double));
+  edges = calloc((int)(NH+1)*NV, sizeof(double));
+  
+  if (!tiltH || !tiltV || !position || !radii_xz || !edges){
+    fprintf(stderr, "Monochromator_Rowland: %s: Not enough memory to allocate arrays.\n", NAME_CURRENT_COMP);
+    exit(-1);
+  }
+  
+  int focush_type=0, focusv_type=0;
+  double source_distance = 0, sink_distance = 0;
+  if (focush && focush[0] != '\0'){
+    if (!str_comp("parallel", focush)) focush_type = 1;
+    else if (!str_comp("point", focush)) focush_type = 2;
+    else if (!str_comp("exact", focush)) focush_type = 3;
+    else printf("Monochromator_Rowland: %s: Warning: Ignorning unknown focush value \"%s\".", NAME_CURRENT_COMP, focush);
+  }
+  if (focusv && focusv[0] != '\0'){
+    if (!str_comp("parallel", focusv)) focusv_type = 1;
+    else if (!str_comp("point", focusv)) focusv_type = 2;
+    //else if (!str_comp("exact", focusv)) focusv_type = 3;
+    else printf("Monochromator_Rowland: %s: Warning: Ignorning unknown focusv value \"%s\".", NAME_CURRENT_COMP, focusv);
+  }
+  if (focusv_type || focush_type){
+    source_distance = sqrt(source_x * source_x + source_z * source_z);
+    sink_distance = sqrt(sink_x * sink_x + sink_z * sink_z);
+    rotation_angle = (PI - acos((source_x * sink_x + source_z * sink_z)/source_distance/sink_distance))/2.0;
+    if ((source_x * sink_z - source_z * sink_x) < 0) rotation_angle *= -1;
+  }
+  if (focusv_type && focusv_type<3) {
+    // parallel beam or point source small-x-deviations approximation:
+    if (focusv_type == 1) RV += 2.0 * sink_distance * sin(rotation_angle);
+    else RV += 0.5*(sink_distance + source_distance) * sin(rotation_angle);
+    if (properties.flag & 1) printf("Calculated vertical focus radius %f using %s approximation\n", RV, (focush_type == 1 ? "parallel beam" : "point source"));
+    focusv_type = 0;
+  }
+  if (focush_type && focush_type<3) {
+    // parallel beam or point source small-x-deviations approximation:
+    if (focush_type == 1) RH += 2.0 * sink_distance / sin(rotation_angle);
+    else RH += 0.5*(sink_distance + source_distance) / sin(rotation_angle);
+    if (properties.flag & 1) printf("Calculated horizontal focus radius %f using %s approximation\n", RH, (focush_type == 1 ? "parallel beam" : "point source"));
+    focush_type = 0;
+  }
+  
+  // we need to know the angle which is needed to rotate the vector
+  // (0,radius) around the point rowland_center to our our origin
+  double om = atan2(-center_xz[0], -center_xz[1]);
+
+  double* th_list = calloc((int)NV*NH, sizeof(double)); // store the slab rotation angles
+  
+  for (int v=0; v<NV; ++v) {
+    double y = (v - 0.5*(NV - 1)) * (slab_width[1] + gap);
+    radii_xz[v] = sqrt(radius * radius - y * y);
+    double a_width = 2*atan2(slab_width[0], 2*radii_xz[v]);
+    double a_gap = (NH > 1) ? (coverage[0] - NH * a_width) / (double)(NH - 1) : 0.;
+    if (a_gap < 0) printf("Monochromator_Rowland: %s: Warning horizontal angular gap at y=%f is too small %f.\n",NAME_CURRENT_COMP, y, a_gap);
+    for (int h=0; h<NH; ++h) {
+      double th = om + (h - 0.5*(NH - 1)) * (a_width + a_gap);
+      if (th_list) th_list[v*NH+h] = th;
+      int offset = 3*(v*NH + h);
+      position[offset+0] = center_xz[0] + radii_xz[v] * sin(th);
+      position[offset+1] = y;
+      position[offset+2] = center_xz[1] + radii_xz[v] * cos(th);
+    }
+    // store the edges of each segment angle range
+    for (int h=0; h<NH; ++h){
+      edges[v*(NH+1) + h] = h * (a_width + 0.5*a_gap) - 0.5 * coverage[0] + om;
+    }
+    edges[v*(NH+1) + NH] = 0.5 * coverage[0] + om;
+  }
+  // Go through and calculate the crystal tilts
+  for (int v=0; v<NV; ++v) for (int h=0; h<NH; ++h){
+    int slab = v*NH + h;
+    tiltV[slab] = (RV) ? -asin(position[3*slab+1] / RV) : 0.;
+    //tiltH[slab] = focush_type==3 ? exact_rowland_focus_angle(th_list[slab], radius, source_x, source_z, sink_x, sink_z) : (RH) ? asin(position[3*slab+2]/RH) : 0.;
+    //tiltH[slab] = focush_type==3 ? exact_rowland_focus_angle(source_x, source_z, sink_x, sink_z, position+3*slab) : (RH) ? asin(position[3*slab+2]/RH) : 0.;
+    tiltH[slab] = focush_type==3 ? (th_list[slab] - om) / 2.0 : (RH) ? asin(position[3*slab+2]/RH) : 0.;
+  }
+  
+  if (0 < 1){
+    printf("Rowland sphere centered at (%f, %f, %f) ", center_xz[0], 0., center_xz[1]);
+    printf("with Slabs located at [x y z] / mm:\n");
+    for (int v=NV; v-->0; ){
+      if (NV > 1) printf("Row: %i ", v);
+      printf("[");
+      for (int h=0; h<NH; ++h) {
+        int offset = 3 * (v*NH + h);
+        printf("[% 7.3f % 7.3f % 7.3f]", 1000.0*position[offset], 1000.0*position[offset+1], 1000.0*position[offset+2]);
+      }
+      printf("]\n");
+    }
+    printf("Slabs tilted (horizontal, vertical) degreees: ");
+    for (int v=NV; v-->0; ){
+      if (NV > 1) printf("\nRow: %i", v);
+      for (int h=0; h<NH; ++h) {
+        int slab = v*NH + h;
+        printf("(% 6.3f,% 6.3f) ", tiltH[slab]*RAD2DEG, tiltV[slab]*RAD2DEG);
+      }
+    }
+    printf("\n");
+  }
+  if (th_list) free(th_list);
+
+  rowland = calloc((int)11, sizeof(double));
+  if (rowland) {
+    rowland[0] = center_xz[0];
+    rowland[1] = center_xz[1];
+    rowland[2] = radius;
+    rowland[3] = point0[0];
+    rowland[4] = point0[1];
+    rowland[5] = point1[0];
+    rowland[6] = point1[1];
+    rowland[7] = source_x;
+    rowland[8] = source_z;
+    rowland[9] = sink_x;
+    rowland[10] = sink_z;
+  }
+
+%}
+
+TRACE
+%{
+  double tin, tout;
+  double vw = slab_width[1] + gap;
+  int v_intersect = -1;
+  int h_intersect = -1;
+  int valid_intersect = 0;
+  for (int v=0; v<NV; ++v){
+    double ty = y - (v - 0.5*(NV - 1)) * vw;
+    int flag = cylinder_intersect(&tin, &tout, x - center_xz[0], ty, z - center_xz[1], vx, vy, vz, radii_xz[v], vw);
+    if (flag > 1){
+      // the incoming or outgoing time passes through an endcap
+      // but we only have crystals on the cyllinder side
+      if (fabs(ty + tin * vy) >= vw/2) tin = tout;
+      if (fabs(ty + tout * vy) >= vw/2) tout = tin;
+    }
+    if (flag) {
+      if (tin < 0 && tout > 0) tin = t; // we needn't go back in time
+      if (tout < 0 && tin > 0) tout = t; // is this even possible?
+    }
+    if (flag && tout > t && fabs(ty + tout * vy) < vw/2) {
+      // find out which crystal is intersected:
+      double th = atan2(x - center_xz[0] + tout * vx, z - center_xz[1] + tout * vz);
+      // verify that the final position is at distance radii_xz[v]?
+      for (int h=0; h<NH; ++h){
+        int o = v * (NH + 1) + h;
+        if (edges[o] < th && th < edges[o+1]){
+          v_intersect = v;
+          h_intersect = h;
+          valid_intersect = 1;
+        }
+      }
+    }
+    if (valid_intersect) break;
+  }
+  // now deal with scattering (or not) from the crystal
+  int interacted = 0;
+  if (valid_intersect) {
+    // we need to index the crystal tilt & position arrays:
+    int slab = v_intersect * NH + h_intersect;
+    // Figure out the focussing reorientation
+    Rotation focus;
+    rot_set_rotation(focus, 0, tiltH[slab], tiltV[slab]);
+    // and do the rotation for the velocities
+    mccoordschange_polarisation(focus, &vx, &vy, &vz);
+    // Do the origin shift to the (possibly) intersected crystal center-of-mass
+    // then do the rotation
+    coords_get(rot_apply(focus, coords_set(x - position[3*slab], y - position[3*slab+1], z - position[3*slab+2])), &x, &y, &z);
+    // propagate to the crystal plane
+    PROP_X0;
+    // Determine if an interaction takes place (-1: absorb, 0: transmit, 1: scatter)
+    interacted = (inside_rectangle(z, y, slab_width[0], slab_width[1])) ? crystal_interaction(_particle, &properties, &rTable, &tTable) : 0;
+    // Undo focussing rotation
+    Rotation defocus;
+    rot_transpose(focus, defocus);
+    mccoordschange_polarisation(defocus, &vx, &vy, &vz);
+    coords_get(rot_apply(defocus, coords_set(x, y, z)), &x, &y, &z);
+    // Undo the crystal coordinate centering
+    x += position[3*slab + 0];
+    y += position[3*slab + 1];
+    z += position[3*slab + 2];
+  }
+  // Indicate appropriate interaction occurred (in the correct coordinate system)
+  if (interacted < 0) ABSORB;
+  if (interacted > 0) SCATTER;
+  // No valid intersection *or* no interaction with this component
+  // THIS IS WRONG BECAUSE IT ALSO RESETS TRANSMITTED NEUTRONS! 
+  if (!interacted) 
+    RESTORE_NEUTRON(INDEX_CURRENT_COMP, x, y, z, vx, vy, vz, t, sx, sy, sz, p);
+%}
+
+FINALLY
+%{
+  if (rTableFlag) Table_Free(&rTable);
+  if (tTableFlag) Table_Free(&tTable);
+  if (tiltH) free(tiltH);
+  if (tiltV) free(tiltV);
+  if (position) free(position);
+  if (radii_xz) free(radii_xz);
+  if (edges) free(edges);
+  if (rowland) free(rowland);
+%}
+
+MCDISPLAY
+%{
+if (show_construction){
+  double zero=0;
+  dashed_line(rowland[7], zero, rowland[8], rowland[3], zero, rowland[4], 100);
+  dashed_line(rowland[7], zero, rowland[8], rowland[5], zero, rowland[6], 100);
+  circle("xz", rowland[3], zero, rowland[4], 0.005);
+  circle("xz", rowland[5], zero, rowland[6], 0.002);
+  circle("xz", rowland[5], zero, rowland[6], 0.005);
+  circle("xz", rowland[7], zero, rowland[8], 0.02);
+  circle("xz", rowland[7], zero, rowland[8], 0.01);
+  circle("xz", rowland[9], zero, rowland[10], 0.02);
+  multiline(5, rowland[9] - 0.02, zero, rowland[10], rowland[9] + 0.02, zero, rowland[10],
+               rowland[9], zero, rowland[10],
+               rowland[9], zero, rowland[10] + 0.02, rowland[9], zero, rowland[10] - 0.02);
+  if (rowland) {
+    circle("xz", rowland[0], zero, rowland[1], rowland[2]);
+    multiline(2, zero, zero, zero, rowland[0], zero, rowland[1]);  
+  }
+  multiline(3, rowland[7], zero, rowland[8], zero, zero, zero, rowland[9], zero, rowland[10]); 
+}
+ 
+  for (int i=0; i<NV; ++i) for (int j=0; j<NH; ++j){
+    // crystal corner points: [a, b, c, d]
+    double v[12] = {0,0,0, 0,0,0, 0,0,0, 0,0,0};
+    //
+    // y
+    v[1] = v[4] = -slab_width[1]/2; // ay = by
+    v[7] = v[10] = slab_width[1]/2; // cy = dy
+    // z
+    v[2] = v[11] = -slab_width[0]/2; // az = dz
+    v[5] = v[8] = slab_width[0]/2; // bz = cz
+    // Rotate the points by the crystal focussing angles
+    Rotation focus;
+    rot_set_rotation(focus, 0., tiltH[i*NH + j], tiltV[i*NH + j]);
+    for (int k=0; k<12; k+=3){
+      coords_get(rot_apply(focus, coords_set(v[k],v[k+1],v[k+2])),v+k,v+k+1,v+k+2);
+    }
+    // Move the rotated cystal into the correct position
+    int o = 3*(i * NH + j);
+    for (int k=0; k<12; k+=3) for (int m=0; m<3; ++m) v[k+m] += position[o+m];
+    // Plot the outline
+    multiline(5, v[0], v[1], v[2],
+                 v[3], v[4], v[5],
+                 v[6], v[7], v[8],
+                 v[9], v[10], v[11],
+                 v[0], v[1], v[2]
+    );
+  }
+
+%}
+
+END
