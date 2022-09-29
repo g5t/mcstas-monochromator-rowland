@@ -87,7 +87,7 @@
 * %End
 *******************************************************************************/
 
-DEFINE COMPONENT Monochromator_Rowland2
+DEFINE COMPONENT Monochromator_Rowland
 DEFINITION PARAMETERS ()
 SETTING PARAMETERS (
   string source,
