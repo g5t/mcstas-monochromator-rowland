@@ -98,7 +98,7 @@ SETTING PARAMETERS (
   string transmit="NULL",
   zwidth=0.01,
   yheight=0.01,
-  gap=0.0005,
+  gap=0.,
   int NH=11,
   int NV=1,
   mosaich=30.0,
@@ -129,7 +129,7 @@ SHARE
 %include "read_table-lib"
 
 #pragma acc routine
-double GAUSS_monocurved(double x, double mean, double rms){
+double GAUSS_monorowland(double x, double mean, double rms){
   return (exp(-((x)-(mean))*((x)-(mean))/(2*(rms)*(rms)))/(sqrt(2*PI)*(rms)));
 }
 
@@ -319,7 +319,7 @@ int crystal_interaction(_class_particle* neutron, struct crystal_properties* pro
         double sp = sin(5*sample*Gauss_X[i]);
         double q[2];
         for (int j=0; j<2; ++j) q[j] = (c[1+j] + cp * a[1+j] + sp * b[1+j]) / (c[0] + cp * a[0] + sp * b[0]);
-        total_p += Gauss_W[i] * GAUSS_monocurved(q[1], 0, prop->rms_y) * GAUSS_monocurved(q[0], 0, prop->rms_z);
+        total_p += Gauss_W[i] * GAUSS_monorowland(q[1], 0, prop->rms_y) * GAUSS_monorowland(q[0], 0, prop->rms_z);
       }
       total_p *= 5 * sample;
 
@@ -330,8 +330,8 @@ int crystal_interaction(_class_particle* neutron, struct crystal_properties* pro
       double sphi = sin(phi);
       for (int i=0; i<3; ++i) c[i] += cphi * a[i] + sphi * b[i];
       // update our probability of reflecting based on the chosen Q
-      p_reflect = GAUSS_monocurved(c[2]/c[0], 0, prop->rms_y) * GAUSS_monocurved(c[1]/c[0], 0, prop->rms_z);
-      p_reflect /= total_p * GAUSS_monocurved(phi, 0, sample);
+      p_reflect = GAUSS_monorowland(c[2]/c[0], 0, prop->rms_y) * GAUSS_monorowland(c[1]/c[0], 0, prop->rms_z);
+      p_reflect /= total_p * GAUSS_monorowland(phi, 0, sample);
       if (p_reflect > 1) p_reflect = 1;
       if (p_reflect > 0){
         // update the neutron to have the outgoing velocity
@@ -436,11 +436,11 @@ INITIALIZE
   }
 
   double point0[2], point1[2];
-  double beta0 = coverage_limit(0, source_x, source_z, DEG2RAD * angle_h, center_xz, radius, point0);
+  double beta0 = coverage_limit(0, source_x, source_z, DEG2RAD * 0.5 * angle_h, center_xz, radius, point0);
   if (angle_h && !beta0) {
     printf("Failed to find the horizontal coverage limit\n");
   }
-  double beta1 = coverage_limit(1, source_x, source_z, DEG2RAD * angle_h, center_xz, radius, point1);
+  double beta1 = coverage_limit(1, source_x, source_z, DEG2RAD * 0.5 * angle_h, center_xz, radius, point1);
   if (angle_h && !beta1) {
     printf("Failed to find the horizontal coverage limit\n");
   }
@@ -549,10 +549,20 @@ INITIALIZE
   double* th_list = calloc((int)NV*NH, sizeof(double)); // store the slab rotation angles
   
   for (int v=0; v<NV; ++v) {
+    // Adjust the y-position and radius to account for vertical spherical curvature
     double y = (v - 0.5*(NV - 1)) * (slab_width[1] + gap);
     radii_xz[v] = sqrt(radius * radius - y * y);
-    double a_width = 2*atan2(slab_width[0], 2*radii_xz[v]);
-    double a_gap = (NH > 1) ? (coverage[0] - NH * a_width) / (double)(NH - 1) : 0.;
+    // Find the angular width and angular gap sizes (in radian)
+    double a_width, a_gap;
+    if (gap <= 0.){
+     // calculate the appropriate radial gap
+     a_width = 2 * atan2(slab_width[0], 2 * radii_xz[v]);
+     a_gap = (NH > 1) ? (coverage[0] - NH * a_width) / (double) (NH - 1) : 0.;
+    } else {
+     // Use the RTP method to calculate and *effective* angular width, which might be unphysical
+     a_gap = gap / radii_xz[v]; // gap size in radian
+     a_width = (NH != 0) ? (coverage[0] - (NH - 1) * a_gap) / NH : coverage[0];    
+    }
     if (a_gap < 0) printf("Monochromator_Rowland: %s: Warning horizontal angular gap at y=%f is too small %f.\n",NAME_CURRENT_COMP, y, a_gap);
     for (int h=0; h<NH; ++h) {
       double th = om + (h - 0.5*(NH - 1)) * (a_width + a_gap);
@@ -635,10 +645,11 @@ TRACE
       if (fabs(ty + tout * vy) >= vw/2) tout = tin;
     }
     if (flag) {
-      if (tin < 0 && tout > 0) tin = t; // we needn't go back in time
-      if (tout < 0 && tin > 0) tout = t; // is this even possible?
+      // tin and tout are relative to the starting time!
+      if (tin < 0 && tout > 0) tin = 0; // we needn't go back in time
+      if (tout < 0 && tin > 0) tout = 0; // is this even possible?
     }
-    if (flag && tout > t && fabs(ty + tout * vy) < vw/2) {
+    if (flag && tout > 0 && fabs(ty + tout * vy) < vw/2) {
       // find out which crystal is intersected:
       double th = atan2(x - center_xz[0] + tout * vx, z - center_xz[1] + tout * vz);
       // verify that the final position is at distance radii_xz[v]?
