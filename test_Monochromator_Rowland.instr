@@ -1,26 +1,12 @@
 DEFINE INSTRUMENT BIFROST_secondary (
 Mos=60,
-sampleSizeX=0.001, // Width of monitors at sample position. Guide optimized for up to 0.015, intruments optimized for 0.001 to 0.01.
-sampleSizeY=0.001, // Height of monitors at sample position. Guide optimized for up to 0.015, intruments optimized for 0.001 to 0.01.
-slitSizeX=0.001,
-slitAngle=2,
-slitDistance=0.4,
 focus_choice=0,
 focus_radius=0,
-construction=0,
+construction=0
 )
-SHELL "sh Multi_Source.sh; sh Multi_Cassette.sh"
 DEPENDENCY " -DUSE_OFF "
 DECLARE
 %{
-const double analyzer_energy_meV[5] = {2.7, 3.2, 3.7, 4.4, 5.0};
-double TAS[5];
-double deltaEnergy;
-double middleEnergy;
-int analyzer;
-int cassette;
-int noBS;
-int noSlit;
 char focus_type[10];
 %}
 
@@ -41,36 +27,34 @@ if (focus_choice == 1) sprintf(focus_type,"parallel");
 else if (focus_choice == 2) sprintf(focus_type, "point");
 else if (focus_choice == 3) sprintf(focus_type, "exact");
 
-double minimum=1000., maximum=0, delta=0;
-for (int i=0; i<5; ++i){
-  if (analyzer_energy_meV[i] < minimum) minimum = analyzer_energy_meV[i];
-  if (analyzer_energy_meV[i] > maximum) maximum = analyzer_energy_meV[i];
-  double tmp = tan(asin(9.0446/(sqrt(analyzer_energy_meV[i])*2.0*3.355)));
-  tmp = 3 * tmp * tmp * (Mos * MIN2RAD) * analyzer_energy_meV[i];
-  if (tmp > delta) delta = tmp;
-}
-deltaEnergy = (maximum - minimum) + delta;
-middleEnergy = (maximum + minimum) / 2;
-printf("Incident neutrons over (%f, %f) meV\n", middleEnergy-deltaEnergy/2., middleEnergy+deltaEnergy/2.);
-
 %}
 TRACE
 
-%include "BIFROST_params.instr"
-/* ************** Origin ************** */
 COMPONENT Origin = Progress_bar() AT (0,0,0) ABSOLUTE
+COMPONENT source = Source_simple(
+yheight = 0.01, 
+xwidth = 0.01, 
+E0 = 5, 
+dE = 4, 
+flux = 1e9, 
+dist = 1, 
+focus_xw = 0.1, 
+focus_yh = 0.1
+)
+AT (0,0,0) RELATIVE Origin
 COMPONENT AnalyzerPoint = Arm() AT (0,0,1) RELATIVE PREVIOUS
 COMPONENT AnalyzerReorientation = Arm() AT (0,0,0) RELATIVE PREVIOUS ROTATED (0,0,90) RELATIVE PREVIOUS
 
 COMPONENT Analyzer = Monochromator_Rowland(
-  NH = 7, zwidth = 0.02, yheight = 0.15, mosaic = Mos, DM = 3.355, NV = 1, gap=0.002,
-  show_construction=construction, focush=focus_type, RH=focus_radius, angle_h=2,
+  NH = 7, zwidth = 0.01, yheight = 0.15, mosaic = Mos, DM = 3.355, NV = 1, gap=0.002,
+  show_construction=construction, focush=focus_type, RH=focus_radius, angle_h=4,
   source="Origin", sink="Focus"
 )
-WHEN AT (0, 0, 0) RELATIVE PREVIOUS ROTATED (0, -60, 0) RELATIVE PREVIOUS
-
-COMPONENT DetectorArm = Arm() AT (0,0,0) RELATIVE PREVIOUS ROTATED (0, -120, 0) RELATIVE PREVIOUS
-COMPONENT Detector = Arm() at (0, 0, 1) RELATIVE PREVIOUS
+AT (0, 0, 0) RELATIVE PREVIOUS ROTATED (0, -80, 0) RELATIVE PREVIOUS
+COMPONENT DetectorArm = Arm() AT (0,0,0) RELATIVE PREVIOUS ROTATED (0, -160, 0) RELATIVE AnalyzerReorientation
+COMPONENT Focus = Arm() AT (0, 0, 1) RELATIVE PREVIOUS
+COMPONENT Detector = PSD_monitor(nx=140, ny=90, filename="psd.dat", restore_neutron=1, yheight=0.2, xwidth=0.2)
+AT (0, 0, 0) RELATIVE PREVIOUS
 
 FINALLY
 %{
