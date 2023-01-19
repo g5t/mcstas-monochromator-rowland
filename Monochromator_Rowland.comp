@@ -159,7 +159,7 @@ double circle_xz(double x0, double z0, double x1, double z1, double* c){
 }
 
 #pragma acc routine
-double coverage_limit(int which, double x, double z, double rangle, double* center, double radius, double* point){
+void coverage_limit_point(int which, double x, double z, double rangle, double* center, double radius, double* point){
   double vl = sqrt(x*x + z*z);
   double v[2] = {x/vl, z/vl};
   double xi[2] = {center[0] - x, center[1] - z};
@@ -172,14 +172,6 @@ double coverage_limit(int which, double x, double z, double rangle, double* cent
   // since both (x,z) and point are on the circle, this all simplifies!
   point[0] = x + s[0] * 2*(s[0] * xi[0] + s[1] * xi[1]);
   point[1] = z + s[1] * 2*(s[0] * xi[0] + s[1] * xi[1]);
-  // now calculate beta, the angle between (center)->(point) and (center)->(origin):
-  // 	[(0,0) - (cx, cz)] . [(px, pz) - (cx, cz)] = |(0,0) - (cx, cz)| . |(px, pz) - (cx, cz)| cos(beta)
-  // 	radius^2 - (cx, cz) . (px, pz) = radius^2 cos(beta)
-  // 	cos(beta) = (1 - (cx, cz) . (px, pz)) / radius^2
-  double beta = acos( 1.0 - (point[0]*center[0] + point[1]*center[1])/radius/radius);
-  // If the dot product between (x,z) and (point) is negative, the returned angle should be negative
-  if (x * point[0] + z *point[1] < 0) beta *= -1;
-  return beta;
 }
 
 #pragma acc routine
@@ -421,14 +413,8 @@ INITIALIZE
   }
 
   double point0[2], point1[2];
-  double beta0 = coverage_limit(0, source_x, source_z, DEG2RAD * 0.5 * angle_h, center_xz, radius, point0);
-  if (angle_h && !beta0) {
-    printf("Failed to find the horizontal coverage limit\n");
-  }
-  double beta1 = coverage_limit(1, source_x, source_z, DEG2RAD * 0.5 * angle_h, center_xz, radius, point1);
-  if (angle_h && !beta1) {
-    printf("Failed to find the horizontal coverage limit\n");
-  }
+  coverage_limit_point(0, source_x, source_z, DEG2RAD * 0.5 * angle_h, center_xz, radius, point0);
+  coverage_limit_point(1, source_x, source_z, DEG2RAD * 0.5 * angle_h, center_xz, radius, point1);
 
   if ((properties.flag & 1) && properties.r)
   {
@@ -443,7 +429,7 @@ INITIALIZE
       printf("\n");
       }
     }
-    printf("                     Horizontal coverage limits (from the Rowland circle center) (%f, %f)\n", RAD2DEG*beta0, RAD2DEG*beta1);
+    printf("                     Horizontal coverage (from the Rowland circle center) %f deg\n", RAD2DEG*2*angle_h);
   }
 
   if (reflect != NULL && properties.r && strlen(reflect) && strcmp(reflect,"NULL") && strcmp(reflect,"0")) {
@@ -468,8 +454,9 @@ INITIALIZE
   slab_width[1] = yheight;
   
   
-  // update things to allow for asymetric beta!
-  coverage[0] = fabs(beta0) + fabs(beta1); // DEG2RAD * angle_h;
+  // angle_h & v are from the *source* position, but we need the angles from the Rowland circle center
+  // which is exactly twice angle_h due to the the properties of circles and arclengths
+  coverage[0] = DEG2RAD * 2.0 * angle_h; 
   coverage[1] = DEG2RAD * angle_v;
   int Nax[2] = {NH, 1};
   for (int ax=0; ax < 2; ++ax) if (!coverage[ax]) {
@@ -564,19 +551,15 @@ INITIALIZE
   }
   if (th_list) free(th_list);
 
-  rowland = calloc((int)11, sizeof(double));
+  rowland = calloc((int)7, sizeof(double));
   if (rowland) {
     rowland[0] = center_xz[0];
     rowland[1] = center_xz[1];
     rowland[2] = radius;
-    rowland[3] = point0[0];
-    rowland[4] = point0[1];
-    rowland[5] = point1[0];
-    rowland[6] = point1[1];
-    rowland[7] = source_x;
-    rowland[8] = source_z;
-    rowland[9] = sink_x;
-    rowland[10] = sink_z;
+    rowland[3] = source_x;
+    rowland[4] = source_z;
+    rowland[5] = sink_x;
+    rowland[6] = sink_z;
   }
 
 %}
@@ -653,18 +636,18 @@ TRACE
   if (interacted < 0) ABSORB;
   if (interacted > 0) SCATTER;
   // No valid intersection *or* no interaction with this component
-  if (!interacted) {
-    // Reset the neutron position and velocity vectors
-    x = ix;
-    y = iy;
-    z = iz;
-    vx = ivx;
-    vy = ivy;
-    vz = ivz;
-    sx = isx;
-    sy = isy;
-    sz = isz;
-  }
+//  if (!interacted) {
+//    // Reset the neutron position and velocity vectors
+//    x = ix;
+//    y = iy;
+//    z = iz;
+//    vx = ivx;
+//    vy = ivy;
+//    vz = ivz;
+//    sx = isx;
+//    sy = isy;
+//    sz = isz;
+//  }
     
 %}
 
@@ -681,23 +664,27 @@ FINALLY
 MCDISPLAY
 %{
 if (show_construction){
+  double point0[2], point1[2];
+  coverage_limit_point(0, rowland[3], rowland[4], DEG2RAD * 0.5 * angle_h, rowland, rowland[2], point0);
+  coverage_limit_point(1, rowland[3], rowland[4], DEG2RAD * 0.5 * angle_h, rowland, rowland[2], point1);
+
   double zero=0;
-  dashed_line(rowland[7], zero, rowland[8], rowland[3], zero, rowland[4], 100);
-  dashed_line(rowland[7], zero, rowland[8], rowland[5], zero, rowland[6], 100);
-  circle("xz", rowland[3], zero, rowland[4], 0.005);
-  circle("xz", rowland[5], zero, rowland[6], 0.002);
-  circle("xz", rowland[5], zero, rowland[6], 0.005);
-  circle("xz", rowland[7], zero, rowland[8], 0.02);
-  circle("xz", rowland[7], zero, rowland[8], 0.01);
-  circle("xz", rowland[9], zero, rowland[10], 0.02);
-  multiline(5, rowland[9] - 0.02, zero, rowland[10], rowland[9] + 0.02, zero, rowland[10],
-               rowland[9], zero, rowland[10],
-               rowland[9], zero, rowland[10] + 0.02, rowland[9], zero, rowland[10] - 0.02);
+  dashed_line(rowland[3], zero, rowland[4], point0[0], zero, point0[1], 100);
+  dashed_line(rowland[3], zero, rowland[4], point1[0], zero, point1[1], 100);
+  circle("xz", point0[0], zero, point0[1], 0.005);
+  circle("xz", point1[0], zero, point1[1], 0.002);
+  circle("xz", point1[0], zero, point1[1], 0.005);
+  circle("xz", rowland[3], zero, rowland[4], 0.02);
+  circle("xz", rowland[3], zero, rowland[4], 0.01);
+  circle("xz", rowland[5], zero, rowland[6], 0.02);
+  multiline(5, rowland[5] - 0.02, zero, rowland[6], rowland[5] + 0.02, zero, rowland[6],
+               rowland[5], zero, rowland[6],
+               rowland[5], zero, rowland[6] + 0.02, rowland[5], zero, rowland[6] - 0.02);
   if (rowland) {
     circle("xz", rowland[0], zero, rowland[1], rowland[2]);
     multiline(2, zero, zero, zero, rowland[0], zero, rowland[1]);  
   }
-  multiline(3, rowland[7], zero, rowland[8], zero, zero, zero, rowland[9], zero, rowland[10]); 
+  multiline(3, rowland[3], zero, rowland[4], zero, zero, zero, rowland[5], zero, rowland[6]); 
 }
  
   for (int j=0; j<NH; ++j){
