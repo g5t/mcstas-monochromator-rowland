@@ -46,7 +46,7 @@ COMPONENT AnalyzerPoint = Arm() AT (0,0,1) RELATIVE PREVIOUS
 COMPONENT AnalyzerReorientation = Arm() AT (0,0,0) RELATIVE PREVIOUS ROTATED (0,0,90) RELATIVE PREVIOUS
 
 COMPONENT Analyzer = Monochromator_Rowland(
-  NH = 7, zwidth = 0.01, yheight = 0.15, mosaic = Mos, DM = 3.355, NV = 1, gap=0.002,
+  NH = 7, zwidth = 0.01, yheight = 0.15, mosaic = Mos, DM = 3.355, gap=0.002,
   show_construction=construction, focush=focus_type, RH=focus_radius, angle_h=4,
   source="Origin", sink="Focus"
 )

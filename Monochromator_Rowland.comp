@@ -372,6 +372,7 @@ DECLARE
   double *radii_xz;
   double *edges;
   double *rowland;
+  double radius;
 %}
 
 INITIALIZE
@@ -405,7 +406,7 @@ INITIALIZE
   coords_get(src, &source_x, &source_y, &source_z);
   coords_get(snk, &sink_x, &sink_y, &sink_z);
   
-  double radius = circle_xz(source_x, source_z, sink_x, sink_z, center_xz);
+  radius = circle_xz(source_x, source_z, sink_x, sink_z, center_xz);
   if (radius < 0){
     fprintf(stderr,
       "Monochromator_Rowland: %s: Virtual source (%f, %f) and sink (%f, %f) are colinear with the monochromator\n",
@@ -479,7 +480,7 @@ INITIALIZE
   position = calloc((int)3*NH, sizeof(double));
   edges = calloc((int)(NH+1), sizeof(double));
   
-  if (!tiltH || !tiltV || !position || !edges){
+  if (!tiltH || !position || !edges){
     fprintf(stderr, "Monochromator_Rowland: %s: Not enough memory to allocate arrays.\n", NAME_CURRENT_COMP);
     exit(-1);
   }
@@ -523,7 +524,7 @@ INITIALIZE
    a_gap = gap / radius; // gap size in radian
    a_width = (NH != 0) ? (coverage[0] - (NH - 1) * a_gap) / NH : coverage[0];    
   }
-  if (a_gap < 0) printf("Monochromator_Rowland: %s: Warning horizontal angular gap at y=%f is too small %f.\n",NAME_CURRENT_COMP, y, a_gap);
+  if (a_gap < 0) printf("Monochromator_Rowland: %s: Warning horizontal angular gap is too small %f.\n",NAME_CURRENT_COMP, a_gap);
   for (int h=0; h<NH; ++h) {
     double th = om + (h - 0.5*(NH - 1)) * (a_width + a_gap);
     if (th_list) th_list[h] = th;
@@ -550,13 +551,13 @@ INITIALIZE
     printf("with Slabs located at [x y z] / mm:\n");
     printf("[");
     for (int h=0; h<NH; ++h) {
-      int offset = 3 * (v*NH + h);
+      int offset = 3 * h;
       printf("[% 7.3f % 7.3f % 7.3f]", 1000.0*position[offset], 1000.0*position[offset+1], 1000.0*position[offset+2]);
     }
     printf("]\n");
     printf("Slabs tilted (horizontal) degreees: ");
     for (int h=0; h<NH; ++h) {
-      int slab = v*NH + h;
+      int slab = h;
       printf("% 6.3f, ", tiltH[slab]*RAD2DEG);
     }
     printf("\n");
@@ -613,7 +614,16 @@ TRACE
   // now deal with scattering (or not) from the crystal
   int interacted = 0;
   // store the input neutron parameters:
-  double ix{x}, iy{y}, iz{z}, ivx{vx}, ivy{vy}, ivz{vz}, isx{sx}, isy{sy}, isz{sz};
+  double ix, iy, iz, ivx, ivy, ivz, isx, isy, isz;
+  ix = x;
+  iy = y;
+  iz = z;
+  ivx = vx;
+  ivy = vy;
+  ivz = vz;
+  isx = sx;
+  isy = sy;
+  isz = sz;
   if (valid_intersect) {
     // we need to index the crystal tilt & position arrays:
     int slab = h_intersect;
