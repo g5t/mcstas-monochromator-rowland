@@ -147,7 +147,7 @@ double circle_xz(double x0, double z0, double x1, double z1, double* c){
   if (m0 == m1 && c[0] == c[1]) return -1.;
   // by picking the large absolute slope we avoid division by zero
   // (hopefully also produces a more-stable result?)
-  if (abs(m0) > abs(m1)){
+  if (fabs(m0) > fabs(m1)){
     c[0] = (m0 * m1 * (z0 - z1) + m1 * x0 - m0 * x1) / (2 * (m1 - m0));
     c[1] = (0.5 * x0 - c[0]) / m0 + 0.5 * z0;
   } else {
